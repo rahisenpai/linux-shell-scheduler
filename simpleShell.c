@@ -20,11 +20,11 @@
 
 //struct to store commands info
 struct Process{
-    int pid;
+    int pid, priority;
     bool submit,queue,completed;
     char command[MAX_SIZE + 1]; //+1 to accomodate \n or \0
     struct timeval start;
-    unsigned long execution_time, wait_time;
+    unsigned long execution_time, wait_time, vruntime;
 };
 
 struct history_struct {
@@ -255,6 +255,7 @@ int launch(char* command){
         // Check if the priority is specified
         process_table->history[process_table->history_count].submit = true;
         process_table->history[process_table->history_count].completed = false;
+        process_table->history[process_table->history_count].priority = 1;
         process_table->history[process_table->history_count].queue = false;
         process_table->history[process_table->history_count].pid = submit_process(command);
         start_time(&process_table->history[process_table->history_count].start);
@@ -272,7 +273,7 @@ int launch(char* command){
     if (strcmp(command,"jobs") == 0){
         for (int i=0; i<process_table->history_count; i++){
             if (process_table->history[i].submit==true && process_table->history[i].completed==false){
-                printf("%d\t%s\n",process_table->history[i].pid,process_table->history[i].command);
+                printf("%d\t%d\t%s\n",process_table->history[i].pid,process_table->history[i].priority,process_table->history[i].command);
             }
         }
         sem_post(&process_table->mutex);
@@ -447,6 +448,15 @@ int submit_process(char *command){
     while (token != NULL){
         arguments[argument_count++] = token;
         token = strtok(NULL, " ");
+    }
+    if (argument_count > 1){
+        priority = atoi(arguments[--argument_count]);
+        if (priority<1 || priority>4){
+            printf("either invalid priority or you are passing arguments for a job");
+            process_table->history[process_table->history_count].completed = true;
+            return -1;
+        }
+        process_table->history[process_table->history_count].priority = priority;
     }
     arguments[argument_count] = NULL;
     status = fork();

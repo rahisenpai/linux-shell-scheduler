@@ -15,7 +15,7 @@
 //definitions
 #define MAX_SIZE 50
 #define MAX_HISTORY 75
-#define MAX_SUBMIT 10
+#define MAX_SUBMIT 20
 
 //struct to store commands info
 struct Process{
@@ -23,7 +23,7 @@ struct Process{
     bool submit,queue,completed;
     char command[MAX_SIZE + 1]; //+1 to accomodate \n or \0
     struct timeval start;
-    unsigned long execution_time, wait_time;
+    unsigned long execution_time, wait_time, vruntime;
 };
 
 struct history_struct {
@@ -37,6 +37,11 @@ struct queue{
     struct Process **table;
 };
 
+struct pqueue{
+    int size,capacity;
+    struct Process **heap;
+};
+
 //function declarations
 void scheduler(int ncpu, int tslice);
 static void my_handler(int signum);
@@ -48,11 +53,19 @@ int next_tail(struct queue *q);
 bool queue_full(struct queue *q);
 void enqueue(struct queue *q, struct Process *proc);
 void dequeue(struct queue *q);
+bool pqueue_empty(struct pqueue *pq);
+bool pqueue_full(struct pqueue *pq);
+void swap(struct Process* a, struct Process* b);
+void heapifyUp(struct pqueue* pq, int index);
+void heapifyDown(struct pqueue* pq, int index);
+void penqueue(struct pqueue *pq, struct Process *proc);
+struct Process* pdequeue(struct pqueue *pq);
 
 //global variables
 int shm_fd;
 struct history_struct *process_table;
-struct queue *ready_q,*running_q;
+struct queue *running_q;
+struct pqueue *ready_q;
 
 int main(){
     //signal part to handle ctrl c (from lecture 7)
@@ -79,12 +92,12 @@ int main(){
     int ncpu = process_table->ncpu;
     int tslice = process_table->tslice;
 
-    ready_q = (struct queue *) (malloc(sizeof(struct queue)));
-    ready_q->head = ready_q->tail = ready_q->curr = 0;
-    ready_q->capacity = MAX_SUBMIT+1;
-    ready_q->table = (struct Process **) malloc(ready_q->capacity * sizeof(struct Process));
+    ready_q = (struct pqueue *) (malloc(sizeof(struct pqueue)));
+    ready_q->size = 0;
+    ready_q->capacity = MAX_SUBMIT;
+    ready_q->heap = (struct Process **) malloc(ready_q->capacity * sizeof(struct Process));
     for (int i = 0; i < ready_q->capacity; i++) {
-        ready_q->table[i] = (struct Process *)malloc(sizeof(struct Process));
+        ready_q->heap[i] = (struct Process *)malloc(sizeof(struct Process));
     }
     running_q = (struct queue *) (malloc(sizeof(struct queue)));
     running_q->head = running_q->tail = running_q->curr = 0;
@@ -104,7 +117,7 @@ int main(){
 
     free(running_q->table);
     free(running_q);
-    free(ready_q->table);
+    free(ready_q->heap);
     free(ready_q);
     if (munmap(process_table, sizeof(struct history_struct)) < 0){
         printf("Error unmapping\n");
@@ -121,9 +134,9 @@ void scheduler(int ncpu, int tslice){
         sem_wait(&process_table->mutex);
         for (int i=0; i<process_table->history_count; i++){
             if (process_table->history[i].submit==true && process_table->history[i].completed==false && process_table->history[i].queue==false){
-                if (ready_q->curr+ncpu < ready_q->capacity-1){
+                if (ready_q->size+ncpu < ready_q->capacity-1){
                     process_table->history[i].queue=true;
-                    enqueue(ready_q, &process_table->history[i]);
+                    penqueue(ready_q, &process_table->history[i]);
                 }
                 else{
                     break;
@@ -134,8 +147,9 @@ void scheduler(int ncpu, int tslice){
             for (int i=0; i<ncpu; i++){
                 if (!queue_empty(running_q)){
                     if (!running_q->table[running_q->head]->completed){
-                        enqueue(ready_q, running_q->table[running_q->head]);
+                        penqueue(ready_q, running_q->table[running_q->head]);
                         running_q->table[running_q->head]->execution_time += end_time(&running_q->table[running_q->head]->start);
+                        running_q->table[running_q->head]->vruntime += running_q->table[running_q->head]->execution_time *running_q->table[running_q->head]->priority;
                         kill(running_q->table[running_q->head]->pid, SIGSTOP);
                         start_time(&running_q->table[running_q->head]->start);
                         dequeue(running_q);
@@ -146,14 +160,14 @@ void scheduler(int ncpu, int tslice){
                 }
             }
         }
-        if (!queue_empty(ready_q)){
+        if (!pqueue_empty(ready_q)){
             for (int i=0; i<ncpu; i++){
-                if (!queue_empty(ready_q)){
-                    enqueue(running_q, ready_q->table[ready_q->head]);
-                    running_q->table[running_q->head]->wait_time += end_time(&running_q->table[running_q->head]->start);
-                    kill(ready_q->table[ready_q->head]->pid, SIGCONT);
+                if (!pqueue_empty(ready_q)){
+                    struct Process *proc = pdequeue(ready_q);
+                    enqueue(running_q, proc);
+                    running_q->table[running_q->tail]->wait_time += end_time(&running_q->table[running_q->tail]->start);
+                    kill(proc->pid, SIGCONT);
                     start_time(&running_q->table[running_q->head]->start);
-                    dequeue(ready_q);
                 }
             }
         }
@@ -168,7 +182,7 @@ static void my_handler(int signum){
         printf("Terminating simple scheduler...\n");
         free(running_q->table);
         free(running_q);
-        free(ready_q->table);
+        free(ready_q->heap);
         free(ready_q);
         if (munmap(process_table, sizeof(struct history_struct)) < 0){
             printf("Error unmapping\n");
@@ -233,4 +247,70 @@ void dequeue(struct queue *q){
     }
     q->curr--;
     q->head = next_head(q);
+}
+
+//pqueue methods
+bool pqueue_empty(struct pqueue *pq){
+    return pq->size == 0;
+}
+
+bool pqueue_full(struct pqueue *pq){
+    return pq->size == pq->capacity;
+}
+
+void swap(struct Process* a, struct Process* b){
+    struct Process temp = *a;
+    *a = *b;
+    *b = temp;
+}
+
+void heapifyUp(struct pqueue* pq, int index){
+    while (index>0){
+        int parent = (index-1)/2;
+        if (pq->heap[index]->vruntime < pq->heap[parent]->vruntime){
+            swap(pq->heap[index], pq->heap[parent]);
+            index = parent;
+        }
+        else{
+            break;
+        }
+    }
+}
+
+void heapifyDown(struct pqueue* pq, int index){
+    int leftChild = 2*index + 1;
+    int rightChild = 2*index + 2;
+    int smallest = index;
+
+    if (leftChild<pq->size && pq->heap[leftChild]->vruntime < pq->heap[smallest]->vruntime){
+        smallest = leftChild;
+    }
+
+    if (rightChild<pq->size && pq->heap[rightChild]->vruntime < pq->heap[smallest]->vruntime){
+        smallest = rightChild;
+    }
+
+    if (smallest != index){
+        swap(pq->heap[index], pq->heap[smallest]);
+        heapifyDown(pq, smallest);
+    }
+}
+
+void penqueue(struct pqueue *pq, struct Process *proc){
+    if (pq->size < pq->capacity){
+        pq->heap[pq->size] = proc;
+        heapifyUp(pq, pq->size);
+        pq->size++;
+    }
+}
+
+struct Process* pdequeue(struct pqueue *pq){
+    if (pq->size>0){
+        struct Process* removed = pq->heap[0];
+        pq->heap[0] = pq->heap[pq->size - 1];
+        pq->size--;
+        heapifyDown(pq, 0);
+        return removed;
+    }
+    return NULL;
 }
