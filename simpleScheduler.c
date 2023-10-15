@@ -32,15 +32,27 @@ struct history_struct {
     struct Process history[MAX_HISTORY];
 };
 
+struct queue{
+    int head,tail,capacity,curr;
+    struct Process **table;
+};
+
 //function declarations
 void scheduler(int ncpu, int tslice);
 static void my_handler(int signum);
 void start_time(struct timeval *start);
 unsigned long end_time(struct timeval *start);
+bool queue_empty(struct queue *q);
+int next_head(struct queue *q);
+int next_tail(struct queue *q);
+bool queue_full(struct queue *q);
+void enqueue(struct queue *q, struct Process *proc);
+void dequeue(struct queue *q);
 
 //global variables
 int shm_fd;
 struct history_struct *process_table;
+struct queue *ready_q,*running_q;
 
 int main(){
     //signal part to handle ctrl c (from lecture 7)
@@ -67,6 +79,21 @@ int main(){
     int ncpu = process_table->ncpu;
     int tslice = process_table->tslice;
 
+    ready_q = (struct queue *) (malloc(sizeof(struct queue)));
+    ready_q->head = ready_q->tail = ready_q->curr = 0;
+    ready_q->capacity = MAX_SUBMIT+1;
+    ready_q->table = (struct Process **) malloc(ready_q->capacity * sizeof(struct Process));
+    for (int i = 0; i < ready_q->capacity; i++) {
+        ready_q->table[i] = (struct Process *)malloc(sizeof(struct Process));
+    }
+    running_q = (struct queue *) (malloc(sizeof(struct queue)));
+    running_q->head = running_q->tail = running_q->curr = 0;
+    running_q->capacity = ncpu+1;
+    running_q->table = (struct Process **) malloc(running_q->capacity * sizeof(struct Process));
+    for (int i = 0; i < running_q->capacity; i++) {
+        running_q->table[i] = (struct Process *)malloc(sizeof(struct Process));
+    }
+
     sem_init(&process_table->mutex, 1, 1);
     if(daemon(1, 1)){
         perror("daemon");
@@ -75,6 +102,10 @@ int main(){
 
     scheduler(ncpu, tslice);
 
+    free(running_q->table);
+    free(running_q);
+    free(ready_q->table);
+    free(ready_q);
     if (munmap(process_table, sizeof(struct history_struct)) < 0){
         printf("Error unmapping\n");
         perror("munmap");
@@ -87,6 +118,46 @@ int main(){
 void scheduler(int ncpu, int tslice){
     while(true){
         sleep(tslice/1000);
+        sem_wait(&process_table->mutex);
+        for (int i=0; i<process_table->history_count; i++){
+            if (process_table->history[i].submit==true && process_table->history[i].completed==false && process_table->history[i].queue==false){
+                if (ready_q->curr+ncpu < ready_q->capacity-1){
+                    process_table->history[i].queue=true;
+                    enqueue(ready_q, &process_table->history[i]);
+                }
+                else{
+                    break;
+                }
+            }
+        }
+        if (!queue_empty(running_q)){
+            for (int i=0; i<ncpu; i++){
+                if (!queue_empty(running_q)){
+                    if (!running_q->table[running_q->head]->completed){
+                        enqueue(ready_q, running_q->table[running_q->head]);
+                        running_q->table[running_q->head]->execution_time += end_time(&running_q->table[running_q->head]->start);
+                        kill(running_q->table[running_q->head]->pid, SIGSTOP);
+                        start_time(&running_q->table[running_q->head]->start);
+                        dequeue(running_q);
+                    }
+                    else{
+                        dequeue(running_q);
+                    }
+                }
+            }
+        }
+        if (!queue_empty(ready_q)){
+            for (int i=0; i<ncpu; i++){
+                if (!queue_empty(ready_q)){
+                    enqueue(running_q, ready_q->table[ready_q->head]);
+                    running_q->table[running_q->head]->wait_time += end_time(&running_q->table[running_q->head]->start);
+                    kill(ready_q->table[ready_q->head]->pid, SIGCONT);
+                    start_time(&running_q->table[running_q->head]->start);
+                    dequeue(ready_q);
+                }
+            }
+        }
+        sem_post(&process_table->mutex);
     }
 }
 
@@ -95,6 +166,10 @@ static void my_handler(int signum){
     if(signum == SIGINT){
         printf("\nCaught SIGINT signal for termination\n");
         printf("Terminating simple scheduler...\n");
+        free(running_q->table);
+        free(running_q);
+        free(ready_q->table);
+        free(ready_q);
         if (munmap(process_table, sizeof(struct history_struct)) < 0){
             printf("Error unmapping\n");
             perror("munmap");
@@ -116,4 +191,46 @@ unsigned long end_time(struct timeval *start){
   gettimeofday(&end, 0);
   t = ((end.tv_sec*1000000) + end.tv_usec) - ((start->tv_sec*1000000) + start->tv_usec);
   return t/1000;
+}
+
+//queue methods
+bool queue_empty(struct queue *q){
+    return q->head == q->tail;
+}
+
+int next_head(struct queue *q){
+    if (q->head == q->capacity-1){
+        return 0;
+    }
+    return q->head+1;
+}
+
+int next_tail(struct queue *q){
+    if (q->tail == q->capacity-1){
+        return 0;
+    }
+    return q->tail+1;
+}
+
+bool queue_full(struct queue *q){
+    return next_tail(q) == q->head;
+}
+
+void enqueue(struct queue *q, struct Process *proc){
+    if (queue_full(q)){
+        printf("queue overflow, upper cap of 20 jobs at once\n");
+        return;
+    }
+    q->curr++;
+    q->table[q->tail] = proc;
+    q->tail = next_tail(q);
+}
+
+void dequeue(struct queue *q){
+    if (queue_empty(q)){
+        printf("queue underflow\n");
+        return;
+    }
+    q->curr--;
+    q->head = next_head(q);
 }

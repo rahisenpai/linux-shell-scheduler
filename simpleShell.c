@@ -24,7 +24,7 @@ struct Process{
     bool submit,queue,completed;
     char command[MAX_SIZE + 1]; //+1 to accomodate \n or \0
     struct timeval start;
-    unsigned long execution_time, wait_time;;
+    unsigned long execution_time, wait_time;
 };
 
 struct history_struct {
@@ -108,13 +108,24 @@ int main(int argc, char** argv){
     }
 
     //signal part to handle ctrl c (from lecture 7)
-    struct sigaction s_int;
+    struct sigaction s_int, s_chld;
     if (memset(&s_int, 0, sizeof(s_int)) == 0){
         perror("memset");
         exit(1);
     }
     s_int.sa_handler = sigint_handler;
     if (sigaction(SIGINT, &s_int, NULL) == -1){
+        perror("sigaction");
+        exit(1);
+    }
+
+    if (memset(&s_chld, 0, sizeof(s_chld)) == 0){
+        perror("memset");
+        exit(1);
+    }
+    s_chld.sa_sigaction = sigchld_handler;
+    s_chld.sa_flags = SA_SIGINFO|SA_NOCLDSTOP|SA_RESTART;
+    if (sigaction(SIGCHLD, &s_chld, NULL) == -1){
         perror("sigaction");
         exit(1);
     }
@@ -155,15 +166,32 @@ static void sigint_handler(int signum) {
     }
 }
 
+static void sigchld_handler(int signum, siginfo_t *info, void *context){
+    if(signum == SIGCHLD){
+        pid_t sender_pid = info->si_pid;
+        if (sender_pid != scheduler_pid){
+            sem_wait(&process_table->mutex);
+            for (int i=0; i<process_table->history_count; i++){
+                if (process_table->history[i].pid == sender_pid){
+                    process_table->history[i].execution_time += end_time(&process_table->history[i].start);
+                    process_table->history[i].completed = true;
+                    break;
+                }
+            }
+            sem_post(&process_table->mutex);
+        }
+    }
+}
+
 //the function called upon termination to print command details
 //in here we are formatting time and printing iterating over the global array
 void termination_report(){
     sem_wait(&process_table->mutex);
     if (process_table->history_count>0){
         //PID is -1 if a command was not executed through process creation
-        printf("\nCommand  PID  Execution_time Waiting_time\n");
+        printf("\nCommand\tPID\tExecution_time\tWaiting_time\n");
         for (int i=0; i<process_table->history_count; i++){
-            printf("%s  %d  %ldms  %ldms\n",process_table->history[i].command,process_table->history[i].pid,process_table->history[i].execution_time,process_table->history[i].wait_time);
+            printf("%s\t%d\t%ldms\t%ldms\n",process_table->history[i].command,process_table->history[i].pid,process_table->history[i].execution_time,process_table->history[i].wait_time);
         }
     }
     sem_post(&process_table->mutex);
@@ -227,6 +255,7 @@ int launch(char* command){
         // Check if the priority is specified
         process_table->history[process_table->history_count].submit = true;
         process_table->history[process_table->history_count].completed = false;
+        process_table->history[process_table->history_count].queue = false;
         process_table->history[process_table->history_count].pid = submit_process(command);
         start_time(&process_table->history[process_table->history_count].start);
         sem_post(&process_table->mutex);
@@ -236,6 +265,15 @@ int launch(char* command){
     if (strcmp(command,"history") == 0){
         for (int i=0; i<process_table->history_count+1; i++){
             printf("%s\n",process_table->history[i].command);
+        }
+        sem_post(&process_table->mutex);
+        return 1;
+    }
+    if (strcmp(command,"jobs") == 0){
+        for (int i=0; i<process_table->history_count; i++){
+            if (process_table->history[i].submit==true && process_table->history[i].completed==false){
+                printf("%d\t%s\n",process_table->history[i].pid,process_table->history[i].command);
+            }
         }
         sem_post(&process_table->mutex);
         return 1;
