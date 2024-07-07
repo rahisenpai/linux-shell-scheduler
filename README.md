@@ -3,6 +3,7 @@
 1) The shell code is in `simpleShell.c` and scheduler code is in `simpleScheduler.c`.
 2) Use `make` on your Linux terminal to compile the programs with appropriate flags present as a command in `MakeFile`.
 3) Run the shell with `./shell <NCPU> <TIME_QUANTUM>`, where NCPU is the number of CPUs available to run processes simultaneously and TIME_QUANTUM is the time slice for Round-Robin scheduling policy.
+4) The files `fib.c`, `p1.c`, `p2.c` and `p3.c` are simple programs which take an execution time of about 5 seconds, intended to test the shell and scheduler.
 ## Shell
 ### Explanation
 We have implemented a SimpleShell that waits for user input, executes commands provided by user including commands involving pipes, background processes and shell scripts and then repeats this 2-phase execution until terminated using ctrl-c.  
